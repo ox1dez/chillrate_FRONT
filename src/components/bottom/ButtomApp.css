@@ -1,0 +1,22 @@
+.mainDivBottom {
+  background-color: #f1f5f9;
+  padding: 2rem;
+  text-align: center;
+  border-top: 1px solid #e2e8f0;
+  color: #64748b;
+  font-size: 0.9rem;
+  margin-top: auto;
+}
+.nameProjectBottom {
+  margin-bottom: 0.5rem;
+  font-weight: 500;
+  color: #1e293b;
+}
+.textAboutProject {
+  margin-bottom: 0.25rem;
+}
+.linkAboutBottom {
+  color: #3b82f6;
+  text-decoration: none;
+}
+
