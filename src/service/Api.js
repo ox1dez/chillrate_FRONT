@@ -139,8 +139,8 @@ class Api{
         });
     }
 
-    static async getUserData(teamId, userEmail, token) {
-      return await axios.get(`${this.url}/admin/${teamId}/${userEmail}`, {headers: {Authorization: `Client ${token}`}})
+    static async getUserData(teamId, userId, sensorType, token) {
+      return await axios.get(`${this.url}/team/${teamId}/${userId}/data/${sensorType}`, {headers: {Authorization: `Client ${token}`}})
         .then((response) => {
           return response.data;
         })

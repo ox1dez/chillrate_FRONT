@@ -1,5 +1,5 @@
 import { useParams, Link } from 'react-router-dom';
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import Api from '../../../service/Api';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -42,10 +42,46 @@ const buttonStyle = {
   fontSize: 14
 };
 
+// Функция для форматирования данных
+const formatChartData = (response) => {
+  if (!response || !Array.isArray(response)) return [];
+
+  return response.map((item, idx) => {
+    const date = item?.time ? new Date(item.time) : null;
+    if (!date || isNaN(date.getTime())) return null;
+
+    const anxietyValue = typeof item.value === 'number' ? item.value : Number(item.value) || 0;
+
+    return {
+      time: date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      date: date.toLocaleDateString(),
+      anxiety: anxietyValue,
+      fullDate: date,
+      index: idx,
+      uuid: item.uuid,
+      sensorType: item.sensorType
+    };
+  }).filter(Boolean).sort((a, b) => a.fullDate - b.fullDate);
+};
+
+// Функция для получения имени пользователя по ID
+const getUserName = (teamInfo, userId) => {
+  if (!teamInfo || !teamInfo.clients) return userId;
+  
+  const user = teamInfo.clients.find(client => client.id === userId);
+  if (user) {
+    // Возвращаем имя, если оно есть, иначе email без домена, иначе ID
+    return user.name || user.email?.split('@')[0] || userId;
+  }
+  
+  return userId;
+};
+
 export default function UserDetailPage() {
   const { teamId, userId } = useParams();
   const token = localStorage.getItem('token');
-  const [user, setUser] = useState(null);
+  const [userName, setUserName] = useState(userId); // Начальное значение - ID
+  const [teamInfo, setTeamInfo] = useState(null);
   const [chartData, setChartData] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -62,53 +98,163 @@ export default function UserDetailPage() {
   const [dotsVisible, setDotsVisible] = useState(false);
 
   const chartRef = useRef(null);
+  const lastDataUUID = useRef(''); // Для отслеживания изменений по последнему UUID
 
+  // Функция загрузки информации о команде для получения имени пользователя
+  const fetchTeamInfo = useCallback(async () => {
+    try {
+      const response = await Api.getTeamInfo(teamId, token);
+      
+      if (response instanceof Error) {
+        throw new Error(`API Error: ${response.message}`);
+      }
+      
+      setTeamInfo(response);
+      
+      // Устанавливаем имя пользователя
+      const name = getUserName(response, userId);
+      setUserName(name);
+      
+      return response;
+    } catch (e) {
+      console.error('Error fetching team info:', e);
+      // В случае ошибки оставляем userId как есть
+      return null;
+    }
+  }, [teamId, userId, token]);
+
+  // Функция загрузки данных с оптимизацией
+  const fetchUserData = useCallback(async () => {
+    try {
+      const response = await Api.getUserData(teamId, userId, 'per', token);
+      
+      if (response instanceof Error) {
+        throw new Error(`API Error: ${response.message}`);
+      }
+      
+      if (!response || !Array.isArray(response)) {
+        throw new Error('Некорректный формат данных');
+      }
+
+      const formattedData = formatChartData(response);
+      
+      // Проверяем, изменились ли данные (по последнему UUID)
+      const latestUUID = formattedData.length > 0 ? formattedData[formattedData.length - 1].uuid : '';
+      const hasNewData = latestUUID !== lastDataUUID.current;
+      
+      if (hasNewData) {
+        lastDataUUID.current = latestUUID;
+      }
+
+      return { data: formattedData, changed: hasNewData };
+    } catch (e) {
+      console.error('Error fetching user data:', e);
+      throw e;
+    }
+  }, [teamId, userId, token]);
+
+  // Основной эффект для первоначальной загрузки
   useEffect(() => {
     let mounted = true;
 
-    const fetchUserData = async () => {
+    const loadInitialData = async () => {
       try {
-        const response = await Api.getUserData(teamId, userId, 'per', token);
-        if (!response || !Array.isArray(response)) throw new Error('Некорректный формат данных');
+        setError(null);
+        setLoading(true);
+
+        // Загружаем информацию о команде для получения имени
+        await fetchTeamInfo();
+        
+        // Загружаем данные графика
+        const result = await fetchUserData();
+        
         if (!mounted) return;
 
-        const formatted = response.map((item, idx) => {
-          const date = item?.time ? new Date(item.time) : null;
-          if (!date || isNaN(date.getTime())) return null;
-          return {
-            time: date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-            date: date.toLocaleDateString(),
-            anxiety: typeof item.value === 'number' ? item.value : Number(item.value) || 0,
-            fullDate: date,
-            index: idx
-          };
-        }).filter(Boolean).sort((a, b) => a.fullDate - b.fullDate);
-
-        // обновляем только если данные изменились
-        if (formatted.length !== chartData.length) {
-          setChartData(formatted);
-          if (formatted.length > 0) {
-            setCurrentAnxiety(formatted[formatted.length - 1].anxiety);
-            setLastUpdate(formatted[formatted.length - 1].fullDate);
-          }
+        setChartData(result.data);
+        
+        if (result.data.length > 0) {
+          const lastPoint = result.data[result.data.length - 1];
+          setCurrentAnxiety(lastPoint.anxiety);
+          setLastUpdate(lastPoint.fullDate);
         }
+
+        setLoading(false);
+
       } catch (e) {
-        console.error(e);
+        console.error('Initial load error:', e);
+        if (mounted) {
+          setError(e.message || 'Ошибка загрузки данных');
+          setLoading(false);
+        }
       }
     };
 
-    // первый запрос сразу
-    fetchUserData();
-
-    // и затем каждые 5 секунд
-    const interval = setInterval(fetchUserData, 5000);
+    loadInitialData();
 
     return () => {
       mounted = false;
-      clearInterval(interval);
     };
-  }, [teamId, userId, token, chartData.length]);
+  }, [fetchTeamInfo, fetchUserData]);
 
+  // Эффект для периодического обновления ТОЛЬКО графика
+  useEffect(() => {
+    let mounted = true;
+    let intervalId = null;
+
+    const setupPeriodicUpdate = () => {
+      intervalId = setInterval(async () => {
+        if (!mounted) return;
+        
+        try {
+          const result = await fetchUserData();
+          if (!mounted) return;
+
+          // Обновляем ТОЛЬКО если данные изменились
+          if (result.changed) {
+            // Используем функциональное обновление для минимального ререндера
+            setChartData(prevData => {
+              const newData = result.data;
+              
+              // Автоматически расширяем видимую область если смотрим на последние данные
+              if (newData.length > prevData.length && endIndex >= prevData.length - 1) {
+                setEndIndex(newData.length - 1);
+              }
+              
+              return newData;
+            });
+
+            // Обновляем текущие значения
+            if (result.data.length > 0) {
+              const lastPoint = result.data[result.data.length - 1];
+              setCurrentAnxiety(lastPoint.anxiety);
+              setLastUpdate(lastPoint.fullDate);
+            }
+          }
+        } catch (e) {
+          console.error('Periodic update error:', e);
+          // Не прерываем обновление при ошибках
+        }
+      }, 5000); // Обновление каждые 5 секунд
+    };
+
+    // Запускаем обновление только после успешной загрузки
+    if (!loading && !error) {
+      const timeoutId = setTimeout(setupPeriodicUpdate, 1000);
+      
+      return () => {
+        mounted = false;
+        clearTimeout(timeoutId);
+        if (intervalId) clearInterval(intervalId);
+      };
+    }
+
+    return () => {
+      mounted = false;
+      if (intervalId) clearInterval(intervalId);
+    };
+  }, [loading, error, fetchUserData, endIndex]);
+
+  // Эффект для обновления индексов отображения
   useEffect(() => {
     const len = chartData.length;
     if (len === 0) {
@@ -116,6 +262,7 @@ export default function UserDetailPage() {
       setEndIndex(0);
       return;
     }
+    
     if (showLast === 'all' || showLast >= len) {
       setStartIndex(0);
       setEndIndex(len - 1);
@@ -126,20 +273,21 @@ export default function UserDetailPage() {
     }
   }, [chartData, showLast]);
 
-  const getVisibleData = () => {
+  // Оптимизированная функция для получения видимых данных
+  const getVisibleData = useCallback(() => {
     if (!chartData || chartData.length === 0) return [];
     const slice = chartData.slice(startIndex, endIndex + 1);
     if (samplingStep <= 1) return slice;
 
     return slice.filter((p, i) => {
       const absIdx = startIndex + i;
-      // включаем каждый samplingStep-й и обязательно фиксированную точку
       return ((absIdx - startIndex) % samplingStep === 0) || (lockedIndex !== null && absIdx === lockedIndex);
     });
-  };
+  }, [chartData, startIndex, endIndex, samplingStep, lockedIndex]);
 
   const visibleData = getVisibleData();
 
+  // Остальные функции без изменений...
   const zoomIn = () => {
     const len = Math.max(1, endIndex - startIndex + 1);
     const newLen = Math.max(1, Math.floor(len / 2));
@@ -147,6 +295,7 @@ export default function UserDetailPage() {
     setStartIndex(newStart);
     setEndIndex(newStart + newLen - 1);
   };
+
   const zoomOut = () => {
     const len = Math.max(1, endIndex - startIndex + 1);
     const newLen = Math.min(chartData.length, len * 2);
@@ -154,6 +303,7 @@ export default function UserDetailPage() {
     setStartIndex(newStart);
     setEndIndex(Math.min(newStart + newLen - 1, chartData.length - 1));
   };
+
   const panLeft = () => {
     const len = Math.max(1, endIndex - startIndex + 1);
     const shift = Math.max(1, Math.floor(len / 3));
@@ -161,6 +311,7 @@ export default function UserDetailPage() {
     setStartIndex(newStart);
     setEndIndex(Math.min(newStart + len - 1, chartData.length - 1));
   };
+
   const panRight = () => {
     const len = Math.max(1, endIndex - startIndex + 1);
     const shift = Math.max(1, Math.floor(len / 3));
@@ -168,6 +319,7 @@ export default function UserDetailPage() {
     setStartIndex(Math.max(0, newEnd - len + 1));
     setEndIndex(newEnd);
   };
+
   const fitAll = () => {
     setStartIndex(0);
     setEndIndex(chartData.length - 1);
@@ -188,6 +340,7 @@ export default function UserDetailPage() {
       }
     }
   };
+
   const handleChartMouseLeave = () => {
     setHoverIndex(null);
     if (!lockedIndex && chartData.length > 0) {
@@ -196,6 +349,7 @@ export default function UserDetailPage() {
       setLastUpdate(last.fullDate);
     }
   };
+
   const handleChartClick = () => {
     if (hoverIndex === null) return;
     setLockedIndex(prev => (prev === hoverIndex ? null : hoverIndex));
@@ -228,46 +382,55 @@ export default function UserDetailPage() {
   };
 
   const exportCSV = (onlyVisible = false) => {
-    const rows = (onlyVisible ? visibleData : chartData).map(p => ({ index: p.index, date: p.fullDate.toISOString(), anxiety: p.anxiety }));
-    const header = ['index,date,anxiety'];
-    const lines = rows.map(r => `${r.index},${r.date},${r.anxiety}`);
+    const rows = (onlyVisible ? visibleData : chartData).map(p => ({ 
+      index: p.index, 
+      date: p.fullDate.toISOString(), 
+      anxiety: p.anxiety,
+      uuid: p.uuid 
+    }));
+    const header = ['index,date,anxiety,uuid'];
+    const lines = rows.map(r => `${r.index},${r.date},${r.anxiety},${r.uuid}`);
     const csv = header.concat(lines).join('\n');
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `anxiety_${userId || 'user'}.csv`;
+    a.download = `anxiety_${userName || 'user'}.csv`;
     document.body.appendChild(a);
     a.click();
     a.remove();
     URL.revokeObjectURL(url);
   };
 
-  if (loading) return <div style={{ padding: 40, color: '#64748b' }}>Загрузка...</div>;
-  if (error) return <div style={{ padding: 40, color: 'crimson' }}>{error}</div>;
+  if (loading) return <div style={{ padding: 40, color: '#64748b' }}>Загрузка данных...</div>;
+  if (error) return <div style={{ padding: 40, color: 'crimson' }}>Ошибка: {error}</div>;
 
   const highlightedPoint = (lockedIndex !== null && chartData[lockedIndex])
     || (hoverIndex !== null && chartData[hoverIndex])
     || null;
 
   return (
-    <div style={{ minHeight: '100vh', fontFamily: 'Inter, Arial, sans-serif' }}>
+    <div style={{ minHeight: '100vh', fontFamily: 'Inter, Arial, sans-serif', background: 'linear-gradient(to right, #3b83f60e, #8a5cf610)', }}>
       <HeaderApp />
       <main style={{ padding: 20, maxWidth: 1200, margin: '0 auto' }}>
-        <h1 style={{ marginBottom: 8 }}>{user?.name || userId}</h1>
+        <h1 style={{ marginBottom: 8 }}>Пользователь: {userName}</h1>
 
         <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 16 }}>
           <div style={{ padding: 12, background: '#fff', borderRadius: 8, boxShadow: '0 6px 20px rgba(2,6,23,0.04)' }}>
-            <div style={{ color: '#64748b', fontSize: 12 }}>Текущий уровень</div>
+            <div style={{ color: '#64748b', fontSize: 12 }}>Текущий уровень расслабленности</div>
             <div style={{ fontSize: 20, fontWeight: 700 }}>{currentAnxiety !== null ? `${currentAnxiety}%` : '—'}</div>
           </div>
-          <div style={{ padding: 12, background: '#fff', borderRadius: 8 }}>
+          <div style={{ padding: 12, background: '#fff', borderRadius: 8, boxShadow: '0 6px 20px rgba(2,6,23,0.04)' }}>
             <div style={{ color: '#64748b', fontSize: 12 }}>Последнее обновление</div>
-            <div>{lastUpdate ? lastUpdate.toLocaleString() : '—'}</div>
+            <div>{lastUpdate ? lastUpdate.toLocaleString('ru-RU') : '—'}</div>
           </div>
-          <div style={{ padding: 12, background: '#fff', borderRadius: 8 }}>
+          <div style={{ padding: 12, background: '#fff', borderRadius: 8, boxShadow: '0 6px 20px rgba(2,6,23,0.04)' }}>
             <div style={{ color: '#64748b', fontSize: 12 }}>Зафиксированная точка</div>
             <div>{highlightedPoint ? `${highlightedPoint.date} ${highlightedPoint.time} — ${highlightedPoint.anxiety}% (#${highlightedPoint.index})` : 'не выбрана'}</div>
+          </div>
+          <div style={{ padding: 12, background: '#fff', borderRadius: 8, boxShadow: '0 6px 20px rgba(2,6,23,0.04)' }}>
+            <div style={{ color: '#64748b', fontSize: 12 }}>Всего точек данных</div>
+            <div style={{ fontSize: 20, fontWeight: 700 }}>{chartData.length}</div>
           </div>
         </div>
 
@@ -312,8 +475,26 @@ export default function UserDetailPage() {
 
           <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
             <label style={{ color: '#475569', fontSize: 13 }}>Диапазон:</label>
-            <input type="range" min={0} max={Math.max(0, chartData.length - 1)} value={startIndex} onChange={(e) => { const v = Number(e.target.value); setStartIndex(Math.min(v, endIndex)); }} />
-            <input type="range" min={0} max={Math.max(0, chartData.length - 1)} value={endIndex} onChange={(e) => { const v = Number(e.target.value); setEndIndex(Math.max(v, startIndex)); }} />
+            <input 
+              type="range" 
+              min={0} 
+              max={Math.max(0, chartData.length - 1)} 
+              value={startIndex} 
+              onChange={(e) => { 
+                const v = Number(e.target.value); 
+                setStartIndex(Math.min(v, endIndex)); 
+              }} 
+            />
+            <input 
+              type="range" 
+              min={0} 
+              max={Math.max(0, chartData.length - 1)} 
+              value={endIndex} 
+              onChange={(e) => { 
+                const v = Number(e.target.value); 
+                setEndIndex(Math.max(v, startIndex)); 
+              }} 
+            />
             <div style={{ fontSize: 12, color: '#64748b' }}>{`${startIndex} — ${endIndex}`}</div>
           </div>
 
@@ -323,10 +504,10 @@ export default function UserDetailPage() {
           </div>
         </div>
 
-        {/* Chart */}
+        {/* Chart - теперь обновляется минимально */}
         <div style={{ background: '#fff', borderRadius: 8, padding: 12, boxShadow: '0 6px 20px rgba(2,6,23,0.04)', height: 420 }} ref={chartRef}>
           {chartData.length === 0 ? (
-            <div style={{ padding: 20 }}>Нет данных</div>
+            <div style={{ padding: 20, textAlign: 'center', color: '#64748b' }}>Нет данных для отображения</div>
           ) : (
             <ResponsiveContainer width="100%" height="100%">
               <LineChart
@@ -340,8 +521,8 @@ export default function UserDetailPage() {
                 <XAxis dataKey="time" tickFormatter={(v) => v || ''} />
                 <YAxis domain={[0, 100]} />
                 <Tooltip content={<CustomTooltip />} />
-                <Legend verticalAlign="top" />
-                <Area dataKey="anxiety" type="monotone" fillOpacity={0.06} isAnimationActive={false} />
+                <Legend />
+                <Area dataKey="anxiety" type="monotone" fill="#8b5cf6" fillOpacity={0.06} isAnimationActive={false} />
                 <Line
                   dataKey="anxiety"
                   type="monotone"
